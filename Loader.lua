@@ -1,6 +1,6 @@
 local allowedPlaces = {
     [6788434697] = "https://raw.githubusercontent.com/YuoTeAnHub/Open-Source-Hub/refs/heads/main/scripts/AniPhobia.lua",
-    [idgame] = "link",
+    [139432668432124] = "https://raw.githubusercontent.com/YuoTeAnHub/Open-Source-Hub/refs/heads/main/scripts/CLEAR.lua",
 }
 
 local url = allowedPlaces[game.PlaceId]
