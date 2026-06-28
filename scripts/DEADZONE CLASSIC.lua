@@ -480,4 +480,4 @@ VisualsTab:Checkbox({
 	end,
 })
 
-print("Open Source Hub: DEADZONE CLASSIC Loaded!")
+warn("Open Source Hub: DEADZONE CLASSIC loaded")
