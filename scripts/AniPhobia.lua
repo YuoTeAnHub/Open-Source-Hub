@@ -1763,4 +1763,9 @@ Session.Cleanup = function()
 end
 
 _G[IDENTIFIER] = Session
-warn("Open Source Hub: AniPhobia loaded")
+
+game:GetService("StarterGui"):SetCore("SendNotification", {
+    Title = "Open Source Hub",
+    Text = "AniPhobia Loaded",
+    Duration = 5
+})
