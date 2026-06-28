@@ -1,5 +1,5 @@
---// loadstring(game:HttpGet("https://raw.githubusercontent.com/YuoTeAnHub/Open-Source-Hub/refs/heads/main/Bypasses/DEADZONE%20CLASSIC.lua"))()
---// You can delete "--//" up and can use any walkspeed and jumppower
+loadstring(game:HttpGet("https://raw.githubusercontent.com/YuoTeAnHub/Open-Source-Hub/refs/heads/main/Bypasses/DEADZONE%20CLASSIC.lua"))()
+
 
 local env = (getgenv and getgenv()) or _G
 
