@@ -1,3 +1,7 @@
+local ENABLED = true --// false for delete bypass
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/YuoTeAnHub/Open-Source-Hub/refs/heads/main/Bypasses/DEADZONE%20CLASSIC.lua"))()
+
 local env = (getgenv and getgenv()) or _G
 
 if env.DeadZone and type(env.DeadZone.Unload) == "function" then
