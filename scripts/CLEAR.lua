@@ -908,4 +908,9 @@ function Session.Cleanup()
 end
 
 _G[IDENTIFIER] = Session
-warn("Open Source Hub: CLEAR loaded")
+
+game:GetService("StarterGui"):SetCore("SendNotification", {
+    Title = "Open Source Hub",
+    Text = "CLEAR Loaded",
+    Duration = 5
+})
