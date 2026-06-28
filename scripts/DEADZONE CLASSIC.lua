@@ -480,4 +480,8 @@ VisualsTab:Checkbox({
 	end,
 })
 
-warn("Open Source Hub: DEADZONE CLASSIC loaded")
+game:GetService("StarterGui"):SetCore("SendNotification", {
+    Title = "Open Source Hub",
+    Text = "DEADZONE Loaded",
+    Duration = 5
+})
