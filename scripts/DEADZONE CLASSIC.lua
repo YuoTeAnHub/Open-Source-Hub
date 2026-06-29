@@ -483,6 +483,36 @@ VisualsTab:Checkbox({
 	end,
 })
 
+local RFn = game:GetService("ReplicatedStorage"):WaitForChild("RemoteFunctions")
+
+local DupeTab = Window:CreateTab({ Name = "Dupe" })
+
+local slotInput = DupeTab:InputText({ Label = "Slot", Value = "1" })
+local countSlide = DupeTab:SliderInt({ Label = "Count", Value = 10, Minimum = 1, Maximum = 100 })
+
+local function readWidget(w, fallback)
+	if w == nil then return fallback end
+	for _, f in ipairs({"Value","Text","CurrentValue","Number"}) do
+		local v = w[f]
+		if type(v) ~= "function" and v ~= nil then return v end
+	end
+	return fallback
+end
+
+DupeTab:Button({
+	Text = "Dupe",
+	Callback = function()
+		local slotRaw = tostring(readWidget(slotInput, "1"))
+		local slot = slotRaw:match("(%d+)") or "1"
+		local count = tonumber(readWidget(countSlide, 10)) or 10
+		for i = 1, count do
+			task.spawn(function()
+				pcall(function() RFn.Withdraw:InvokeServer(slot, false) end)
+			end)
+		end
+	end,
+})
+
 game:GetService("StarterGui"):SetCore("SendNotification", {
     Title = "Open Source Hub",
     Text = "DEADZONE Loaded",
