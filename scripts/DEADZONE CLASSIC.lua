@@ -642,88 +642,164 @@ local function findNewInventoryEntry(before, after)
 	return nil, nil
 end
 
+local function performDupe(slot, count)
+	slot = tostring(slot)
+	count = math.max(1, math.floor((tonumber(count) or 1) + 0.5))
+	local targetBankSlot = tonumber(slot)
+
+	local before = AutoDeposit and snapshotInventoryBySlot() or nil
+
+	for i = 1, count do
+		task.spawn(function()
+			pcall(function() RFn.Withdraw:InvokeServer(slot, false) end)
+		end)
+	end
+
+	if AutoDeposit and targetBankSlot then
+		task.spawn(function()
+			local newInvSlot, newItem
+			local tries = 0
+			while not newInvSlot and tries < 10 do
+				task.wait(0.15)
+				tries = tries + 1
+				local after = snapshotInventoryBySlot()
+				newInvSlot, newItem = findNewInventoryEntry(before, after)
+			end
+			if not newInvSlot then
+				return
+			end
+
+			local invSlotNum = tonumber(newInvSlot)
+			local sp = newItem.special
+
+			local bankBefore = {}
+			for k, v in pairs(BankCache) do
+				if type(v) == "table" then bankBefore[tostring(k)] = v end
+			end
+
+			local nonce = genNonce()
+			pcall(function()
+				return RFn.Deposit:InvokeServer(sp, invSlotNum, false, nonce, false)
+			end)
+
+			local landedBankSlot
+			local waited = 0
+			while not landedBankSlot and waited < 1.5 do
+				task.wait(0.1)
+				waited = waited + 0.1
+				for k, v in pairs(BankCache) do
+					if type(v) == "table" and not bankBefore[tostring(k)] then
+						landedBankSlot = tostring(k)
+						break
+					end
+				end
+			end
+
+			if landedBankSlot and tonumber(landedBankSlot) ~= targetBankSlot then
+				local src = tostring(landedBankSlot)
+				local dst = tostring(targetBankSlot)
+				local movedItem = BankCache[src]
+				local resS
+				pcall(function() resS = RFn.MoveItem:InvokeServer(src, dst, true) end)
+				if not resS then
+					pcall(function() RFn.MoveItem:InvokeServer(tonumber(src), tonumber(dst), true) end)
+				end
+
+				BankCache[src] = nil
+				BankCache[dst] = movedItem
+
+				local RS = game:GetService("ReplicatedStorage")
+				local BEs = RS:FindFirstChild("BindableEvents")
+				local bankBE = BEs and BEs:FindFirstChild("Bank")
+				if bankBE then
+					pcall(function() bankBE:Fire() end)
+					task.wait(0.05)
+					pcall(function() bankBE:Fire() end)
+				end
+			end
+		end)
+	end
+end
+
+local DUPE_BTN_TAG = "_dzcSlotDupeBtn"
+local dupeBtnConn
+local dupeBtnLoop = false
+
+local function applyDupeButton(btn)
+	if not (btn and btn:IsA("ImageButton")) then return end
+	local n = tonumber(btn.Name)
+	if not n then return end
+	if btn:FindFirstChild(DUPE_BTN_TAG) then return end
+	local b = Instance.new("TextButton")
+	b.Name = DUPE_BTN_TAG
+	b.AnchorPoint = Vector2.new(0, 1)
+	b.Size = UDim2.new(0, 16, 0, 16)
+	b.Position = UDim2.new(0, 2, 1, -2)
+	b.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+	b.BackgroundTransparency = 0.4
+	b.BorderSizePixel = 0
+	b.Text = ""
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.TextStrokeTransparency = 0
+	b.TextStrokeColor3 = Color3.new(0, 0, 0)
+	b.TextSize = 14
+	b.Font = Enum.Font.SourceSansBold
+	b.AutoButtonColor = true
+	b.ZIndex = 20
+	b.Active = true
+	b.Parent = btn
+	track(b.MouseButton1Click:Connect(function()
+		local countRaw = tonumber(readWidget(countSlide, 10)) or 10
+		performDupe(tostring(n), countRaw)
+	end))
+end
+
+local function clearAllDupeButtons()
+	local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+	if not pg then return end
+	for _, d in ipairs(pg:GetDescendants()) do
+		if d.Name == DUPE_BTN_TAG then d:Destroy() end
+	end
+end
+
+DupeTab:Checkbox({
+	Label = "Show Bank Dupe",
+	Value = false,
+	Callback = function(_, v)
+		if v then
+			dupeBtnLoop = true
+			task.spawn(function()
+				while dupeBtnLoop do
+					local f = findBankFrame()
+					if f then
+						for _, ch in ipairs(f:GetChildren()) do applyDupeButton(ch) end
+						if not dupeBtnConn then
+							dupeBtnConn = f.ChildAdded:Connect(function(ch)
+								task.defer(function()
+									if dupeBtnLoop then applyDupeButton(ch) end
+								end)
+							end)
+						end
+					end
+					task.wait(0.5)
+				end
+			end)
+		else
+			dupeBtnLoop = false
+			if dupeBtnConn then pcall(function() dupeBtnConn:Disconnect() end); dupeBtnConn = nil end
+			clearAllDupeButtons()
+		end
+	end,
+})
+
 local DupeRow = DupeTab:Row()
 DupeRow:Button({
 	Text = "Dupe",
 	Callback = function()
 		local slotRaw = tostring(readWidget(slotInput, "1"))
 		local slot = slotRaw:match("(%d+)") or "1"
-		local targetBankSlot = tonumber(slot)
 		local countRaw = tonumber(readWidget(countSlide, 10)) or 10
-		local count = math.max(1, math.floor(countRaw + 0.5))
-
-		local before = AutoDeposit and snapshotInventoryBySlot() or nil
-
-		for i = 1, count do
-			task.spawn(function()
-				pcall(function() RFn.Withdraw:InvokeServer(slot, false) end)
-			end)
-		end
-
-		if AutoDeposit and targetBankSlot then
-			task.spawn(function()
-				local newInvSlot, newItem
-				local tries = 0
-				while not newInvSlot and tries < 10 do
-					task.wait(0.15)
-					tries = tries + 1
-					local after = snapshotInventoryBySlot()
-					newInvSlot, newItem = findNewInventoryEntry(before, after)
-				end
-				if not newInvSlot then
-					return
-				end
-
-				local invSlotNum = tonumber(newInvSlot)
-				local sp = newItem.special
-
-				local bankBefore = {}
-				for k, v in pairs(BankCache) do
-					if type(v) == "table" then bankBefore[tostring(k)] = v end
-				end
-
-				local nonce = genNonce()
-				pcall(function()
-					return RFn.Deposit:InvokeServer(sp, invSlotNum, false, nonce, false)
-				end)
-
-				local landedBankSlot
-				local waited = 0
-				while not landedBankSlot and waited < 1.5 do
-					task.wait(0.1)
-					waited = waited + 0.1
-					for k, v in pairs(BankCache) do
-						if type(v) == "table" and not bankBefore[tostring(k)] then
-							landedBankSlot = tostring(k)
-							break
-						end
-					end
-				end
-
-				if landedBankSlot and tonumber(landedBankSlot) ~= targetBankSlot then
-					local src = tostring(landedBankSlot)
-					local dst = tostring(targetBankSlot)
-					local movedItem = BankCache[src]
-					local resS
-					pcall(function() resS = RFn.MoveItem:InvokeServer(src, dst, true) end)
-					if not resS then
-						pcall(function() RFn.MoveItem:InvokeServer(tonumber(src), tonumber(dst), true) end)
-					end
-
-					BankCache[src] = nil
-					BankCache[dst] = movedItem
-
-					local RS = game:GetService("ReplicatedStorage")
-					local BEs = RS:FindFirstChild("BindableEvents")
-					local bankBE = BEs and BEs:FindFirstChild("Bank")
-					if bankBE then
-						pcall(function() bankBE:Fire() end)
-						task.wait(0.05)
-						pcall(function() bankBE:Fire() end)
-					end
-				end
-			end)
-		end
+		performDupe(slot, countRaw)
 	end,
 })
 DupeRow:Button({
