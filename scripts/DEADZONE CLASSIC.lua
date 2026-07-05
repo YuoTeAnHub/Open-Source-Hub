@@ -868,28 +868,109 @@ DupeRow:Button({
 	Text = "Drop All",
 	Callback = function()
 		task.spawn(function()
-			local ok, inv, items = pcall(function() return RFn.FetchInventory:InvokeServer() end)
-			if not ok then return end
-			local itemsBySlot = items
-			if type(itemsBySlot) ~= "table" and type(inv) == "table" and type(inv.items) == "table" then
-				itemsBySlot = inv.items
-			end
-			if type(itemsBySlot) ~= "table" then return end
-			local stacks = {}
-			for _, it in pairs(itemsBySlot) do
-				if type(it) == "table" and it.special then
-					local qty = tonumber(it.quantity) or 1
-					if qty < 1 then qty = 1 end
-					table.insert(stacks, { special = it.special, qty = qty })
+			-- Iterate rather than trust snapshot quantity: for non-stackable items
+			-- (e.g. fuel canisters where .quantity is liters, not stack count) the
+			-- server drops the whole slot on a single FireServer, so we drop each
+			-- slot once, re-fetch, and repeat until the inventory reports empty.
+			for iter = 1, 200 do
+				local ok, inv, items = pcall(function() return RFn.FetchInventory:InvokeServer() end)
+				if not ok then return end
+				local itemsBySlot = items
+				if type(itemsBySlot) ~= "table" and type(inv) == "table" and type(inv.items) == "table" then
+					itemsBySlot = inv.items
 				end
-			end
-			for _, s in ipairs(stacks) do
-				for i = 1, s.qty do
-					pcall(function() REv.DropItem:FireServer(s.special, true, true) end)
+				if type(itemsBySlot) ~= "table" then return end
+				local specials = {}
+				for _, it in pairs(itemsBySlot) do
+					if type(it) == "table" and it.special then
+						table.insert(specials, it.special)
+					end
+				end
+				if #specials == 0 then return end
+				for _, sp in ipairs(specials) do
+					pcall(function() REv.DropItem:FireServer(sp, true, true) end)
 					task.wait(0.05)
+				end
+				task.wait(0.15)
+			end
+		end)
+	end,
+})
+
+--// Misc tab
+local MiscTab = Window:CreateTab({ Name = "Misc" })
+
+local DEFAULT_MAX_ZOOM = 10
+pcall(function() LocalPlayer.CameraMaxZoomDistance = DEFAULT_MAX_ZOOM end)
+
+MiscTab:SliderInt({
+	Label = "Camera Fov",
+	Value = DEFAULT_MAX_ZOOM,
+	Minimum = 1,
+	Maximum = 1000,
+	Callback = function(_, v)
+		pcall(function() LocalPlayer.CameraMaxZoomDistance = v end)
+	end,
+})
+
+local function initFullbright()
+	if _G.FullBrightExecuted then return end
+
+	local Lighting = game:GetService("Lighting")
+
+	_G.FullBrightEnabled = false
+	_G.NormalLightingSettings = {
+		Brightness    = Lighting.Brightness,
+		ClockTime     = Lighting.ClockTime,
+		FogEnd        = Lighting.FogEnd,
+		GlobalShadows = Lighting.GlobalShadows,
+		Ambient       = Lighting.Ambient,
+	}
+
+	local FORCED = {
+		Brightness    = 1,
+		ClockTime     = 12,
+		FogEnd        = 786543,
+		GlobalShadows = false,
+		Ambient       = Color3.fromRGB(178, 178, 178),
+	}
+
+	local function guard(prop)
+		Lighting:GetPropertyChangedSignal(prop):Connect(function()
+			local cur = Lighting[prop]
+			if cur ~= FORCED[prop] and cur ~= _G.NormalLightingSettings[prop] then
+				_G.NormalLightingSettings[prop] = cur
+				if _G.FullBrightEnabled then
+					Lighting[prop] = FORCED[prop]
 				end
 			end
 		end)
+	end
+	for prop in pairs(FORCED) do guard(prop) end
+
+	local latest = false
+	task.spawn(function()
+		while true do
+			task.wait()
+			if _G.FullBrightEnabled ~= latest then
+				latest = _G.FullBrightEnabled
+				local src = latest and FORCED or _G.NormalLightingSettings
+				for prop, val in pairs(src) do
+					Lighting[prop] = val
+				end
+			end
+		end
+	end)
+
+	_G.FullBrightExecuted = true
+end
+
+MiscTab:Checkbox({
+	Label = "Enable Fullbright",
+	Value = false,
+	Callback = function(_, v)
+		initFullbright()
+		_G.FullBrightEnabled = v
 	end,
 })
 
