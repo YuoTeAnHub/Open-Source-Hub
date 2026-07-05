@@ -11,6 +11,7 @@ local DeadZone = {
 	Connections = {},
 	Esp     = {},
 	Tracked = {},
+	Cars    = {},
 	Dot     = nil,
 	Gui     = nil,
 	Flags = {
@@ -21,12 +22,21 @@ local DeadZone = {
 		Name          = false,
 		Distance      = false,
 		Health        = false,
+		Lines         = false,
+		CarEsp        = false,
 		Dot           = false,
 		DisableCursor = false,
 		SilentSpeed   = false,
 		SilentSpeedMul = 1,
 		Speed         = false,
 		SpeedValue    = 16,
+		Aim           = false,
+		ToggleAim     = false,
+		Wallcheck     = false,
+		AimFov        = 100,
+		AimPart       = "Head",
+		AimBindKey    = "LeftControl",
+		PlayerCheck   = false,
 	},
 }
 env.DeadZone = DeadZone
@@ -50,13 +60,22 @@ function DeadZone.Unload()
 	end
 	if DeadZone.Esp then
 		for _, data in pairs(DeadZone.Esp) do
-			if data.highlight then pcall(function() data.highlight:Destroy() end) end
-			if data.box then pcall(function() data.box:Remove() end) end
+			if data.highlight  then pcall(function() data.highlight:Destroy() end) end
+			if data.box        then pcall(function() data.box:Remove() end) end
+			if data.healthBar  then pcall(function() data.healthBar:Remove() end) end
+			if data.healthBg   then pcall(function() data.healthBg:Remove() end) end
+			if data.line       then pcall(function() data.line:Remove() end) end
 			if data.texts then
 				for _, t in pairs(data.texts) do pcall(function() t:Remove() end) end
 			end
 		end
 		table.clear(DeadZone.Esp)
+	end
+	if DeadZone.Cars then
+		for _, t in pairs(DeadZone.Cars) do
+			for _, c in ipairs(t.conns or {}) do pcall(function() c:Disconnect() end) end
+		end
+		table.clear(DeadZone.Cars)
 	end
 	if DeadZone.Dot and DeadZone.Dot.gui then
 		pcall(function() DeadZone.Dot.gui:Destroy() end)
@@ -92,9 +111,18 @@ local UserInput   = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
 local COLORS = {
-	Player = Color3.fromRGB(255, 60, 60),
+	Player = Color3.fromRGB(255, 255, 255),
 	Zombie = Color3.fromRGB(60, 255, 60),
+	Car    = Color3.fromRGB(255, 255, 0),
 	Dot    = Color3.fromRGB(255, 0, 0),
+}
+
+-- Fixed axis-aligned world box sizes per entity kind so rotating the model
+-- (or the camera) never changes the projected box shape/size.
+local BOX_SIZE = {
+	Player = Vector3.new(4, 6, 4),
+	Zombie = Vector3.new(4, 6, 4),
+	Car    = Vector3.new(14, 6, 24),
 }
 
 local function getHiddenParent()
@@ -143,6 +171,49 @@ local function getModelRoot(model)
 	return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
 end
 
+-- Per-frame cache: Humanoid -> car it's currently seated in. Rebuilt once at
+-- the top of each RenderStepped tick, so ESP for players riding vehicles costs
+-- O(1) lookup per model instead of O(cars * parts_per_car) per model per frame
+-- (that quadratic scan was the source of the Player-ESP lag).
+local frameCarByHum = {}
+
+local function rebuildCarSeatIndex()
+	table.clear(frameCarByHum)
+	local cars = workspace:FindFirstChild("__cars")
+	if not cars then return end
+	for _, car in ipairs(cars:GetChildren()) do
+		for _, part in ipairs(car:GetDescendants()) do
+			if part:IsA("VehicleSeat") or part:IsA("Seat") then
+				local occ = part.Occupant
+				if occ then frameCarByHum[occ] = car end
+			end
+		end
+	end
+end
+
+local function findPlayerCar(model)
+	if not model then return nil end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum then return nil end
+	return frameCarByHum[hum]
+end
+
+-- Resolve the world-space position an ESP box should orbit around, per kind.
+-- For characters: prefer the car they're seated in (fixes stale ESP when the
+-- player drives away), then HRP, then any part. For cars: PrimaryPart.
+local function getEffectivePos(model, kind)
+	if kind == "Car" then
+		local pp = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+		return pp and pp.Position or nil
+	end
+	local car = findPlayerCar(model)
+	if car and car.PrimaryPart then return car.PrimaryPart.Position end
+	local hrp = model:FindFirstChild("HumanoidRootPart")
+	if hrp then return hrp.Position end
+	local any = model:FindFirstChildWhichIsA("BasePart")
+	return any and any.Position or nil
+end
+
 local function getCursorGui()
 	local pg = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
 	return pg and pg:FindFirstChild("Cursor") or nil
@@ -180,8 +251,11 @@ end
 local function removeEsp(model)
 	local data = DeadZone.Esp[model]
 	if not data then return end
-	if data.highlight then pcall(function() data.highlight:Destroy() end) end
-	if data.box then pcall(function() data.box:Remove() end) end
+	if data.highlight  then pcall(function() data.highlight:Destroy() end) end
+	if data.box        then pcall(function() data.box:Remove() end) end
+	if data.healthBar  then pcall(function() data.healthBar:Remove() end) end
+	if data.healthBg   then pcall(function() data.healthBg:Remove() end) end
+	if data.line       then pcall(function() data.line:Remove() end) end
 	if data.texts then
 		for _, t in pairs(data.texts) do pcall(function() t:Remove() end) end
 	end
@@ -260,31 +334,78 @@ local function ensureEsp(model, kind)
 
 	ensureText(data.texts, "name", DeadZone.Flags.Name)
 	ensureText(data.texts, "dist", DeadZone.Flags.Distance)
-	ensureText(data.texts, "health", DeadZone.Flags.Health)
-end
 
-local function getBounds(model)
-	local hb = model:FindFirstChild("Hitbox")
-	if hb then
-		if hb:IsA("BasePart") then return hb.CFrame, hb.Size end
-		if hb:IsA("Model") then return hb:GetBoundingBox() end
+	-- Health bar (vertical strip on the left edge of the box) replaces the old
+	-- "HP: N" text row. Two Squares: a dim background and the filled foreground.
+	local wantBar = DeadZone.Flags.Health and (kind == "Player" or kind == "Zombie")
+	if wantBar then
+		if not data.healthBg then
+			local ok2, bg = pcall(function()
+				local s = Drawing.new("Square")
+				s.Thickness = 1
+				s.Filled    = true
+				s.Color     = Color3.fromRGB(0, 0, 0)
+				s.Transparency = 0.5
+				s.Visible   = false
+				return s
+			end)
+			if ok2 then data.healthBg = bg end
+		end
+		if not data.healthBar then
+			local ok2, bar = pcall(function()
+				local s = Drawing.new("Square")
+				s.Thickness = 1
+				s.Filled    = true
+				s.Color     = Color3.fromRGB(60, 255, 60)
+				s.Visible   = false
+				return s
+			end)
+			if ok2 then data.healthBar = bar end
+		end
+	else
+		if data.healthBg  then pcall(function() data.healthBg:Remove() end);  data.healthBg  = nil end
+		if data.healthBar then pcall(function() data.healthBar:Remove() end); data.healthBar = nil end
 	end
-	return model:GetBoundingBox()
+
+	-- Tracer line from screen center to entity.
+	if DeadZone.Flags.Lines then
+		if not data.line then
+			local ok2, ln = pcall(function()
+				local l = Drawing.new("Line")
+				l.Thickness = 1
+				l.Color     = color
+				l.Visible   = false
+				return l
+			end)
+			if ok2 then data.line = ln end
+		elseif data.line.Color ~= color then
+			data.line.Color = color
+		end
+	elseif data.line then
+		pcall(function() data.line:Remove() end)
+		data.line = nil
+	end
 end
 
-local function getScreenBounds(model)
+-- Build screen-space bounds from a fixed axis-aligned world box centered on the
+-- effective position. This is deliberately not tied to model orientation, so
+-- turning the character/car does not change the projected box shape.
+local function getScreenBounds(model, kind)
 	local cam = workspace.CurrentCamera
 	if not cam then return nil end
-	local cf, size = getBounds(model)
+	local center = getEffectivePos(model, kind)
+	if not center then return nil end
+	local size = BOX_SIZE[kind] or BOX_SIZE.Player
+	local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
 	local corners = {
-		cf * Vector3.new( size.X/2,  size.Y/2,  size.Z/2),
-		cf * Vector3.new(-size.X/2,  size.Y/2,  size.Z/2),
-		cf * Vector3.new( size.X/2, -size.Y/2,  size.Z/2),
-		cf * Vector3.new(-size.X/2, -size.Y/2,  size.Z/2),
-		cf * Vector3.new( size.X/2,  size.Y/2, -size.Z/2),
-		cf * Vector3.new(-size.X/2,  size.Y/2, -size.Z/2),
-		cf * Vector3.new( size.X/2, -size.Y/2, -size.Z/2),
-		cf * Vector3.new(-size.X/2, -size.Y/2, -size.Z/2),
+		center + Vector3.new( hx,  hy,  hz),
+		center + Vector3.new(-hx,  hy,  hz),
+		center + Vector3.new( hx, -hy,  hz),
+		center + Vector3.new(-hx, -hy,  hz),
+		center + Vector3.new( hx,  hy, -hz),
+		center + Vector3.new(-hx,  hy, -hz),
+		center + Vector3.new( hx, -hy, -hz),
+		center + Vector3.new(-hx, -hy, -hz),
 	}
 	local minX, minY = math.huge, math.huge
 	local maxX, maxY = -math.huge, -math.huge
@@ -301,23 +422,63 @@ local function getScreenBounds(model)
 	return minX, minY, maxX, maxY
 end
 
-local function updateBox(model, box)
-	local minX, minY, maxX, maxY = getScreenBounds(model)
-	if not minX then box.Visible = false return end
-	box.Size     = Vector2.new(maxX - minX, maxY - minY)
-	box.Position = Vector2.new(minX, minY)
-	box.Visible  = true
+local function updateBox(model, data, kind)
+	local minX, minY, maxX, maxY = getScreenBounds(model, kind)
+	-- Cache on the data table so updateLabels can reuse the projected bounds
+	-- without projecting all 8 world corners a second time this frame.
+	data._bMinX, data._bMinY = minX, minY
+	data._bMaxX, data._bMaxY = maxX, maxY
+	if not minX then
+		if data.box       then data.box.Visible = false end
+		if data.healthBg  then data.healthBg.Visible = false end
+		if data.healthBar then data.healthBar.Visible = false end
+		return
+	end
+	if data.box then
+		data.box.Size     = Vector2.new(maxX - minX, maxY - minY)
+		data.box.Position = Vector2.new(minX, minY)
+		data.box.Visible  = true
+	end
+
+	-- Health bar rides on the left edge of the box regardless of Box visibility.
+	if data.healthBg and data.healthBar then
+		local hum = data._hum
+		local frac
+		if hum then
+			local maxhp = hum.MaxHealth
+			frac = (maxhp > 0) and math.clamp(hum.Health / maxhp, 0, 1) or 0
+		end
+		if frac then
+			local boxH = maxY - minY
+			local barW = 3
+			local gap  = 3
+			data.healthBg.Size     = Vector2.new(barW, boxH)
+			data.healthBg.Position = Vector2.new(minX - gap - barW, minY)
+			data.healthBg.Visible  = true
+			local filledH = math.max(1, math.floor(boxH * frac))
+			data.healthBar.Size     = Vector2.new(barW, filledH)
+			data.healthBar.Position = Vector2.new(minX - gap - barW, minY + (boxH - filledH))
+			data.healthBar.Color    = Color3.fromRGB(
+				255 - math.floor(195 * frac),
+				60  + math.floor(195 * frac),
+				60)
+			data.healthBar.Visible  = true
+		else
+			data.healthBg.Visible  = false
+			data.healthBar.Visible = false
+		end
+	end
 end
 
-local function updateLabels(model, data, t)
+local function updateLabels(model, data, kind)
 	local texts = data.texts
-	if not texts then return end
-	local minX, minY, maxX, maxY = getScreenBounds(model)
+	local minX, minY = data._bMinX, data._bMinY
+	local maxX, maxY = data._bMaxX, data._bMaxY
 	local onScreen = minX ~= nil
 	local cx = onScreen and (minX + maxX) / 2 or 0
-	local color = COLORS[data.kind]
+	local color = COLORS[kind] or COLORS.Player
 
-	if texts.name then
+	if texts and texts.name then
 		if onScreen and DeadZone.Flags.Name then
 			texts.name.Text     = model.Name
 			texts.name.Color    = color
@@ -328,37 +489,32 @@ local function updateLabels(model, data, t)
 		end
 	end
 
-	local belowY = onScreen and maxY or 0
-
-	if texts.dist then
+	if texts and texts.dist then
 		if onScreen and DeadZone.Flags.Distance then
 			local d = 0
 			local root = getSelfRoot()
-			local zr = getModelRoot(model)
-			if root and zr then d = math.floor((zr.Position - root.Position).Magnitude) end
+			local target = getEffectivePos(model, kind)
+			if root and target then d = math.floor((target - root.Position).Magnitude) end
 			texts.dist.Text     = tostring(d) .. "m"
 			texts.dist.Color    = Color3.fromRGB(255, 255, 255)
-			texts.dist.Position = Vector2.new(cx, belowY + 2)
+			texts.dist.Position = Vector2.new(cx, (onScreen and maxY or 0) + 2)
 			texts.dist.Visible  = true
-			belowY = belowY + 16
 		else
 			texts.dist.Visible = false
 		end
 	end
 
-	if texts.health then
-		local hum = t and t.hum
-		if onScreen and DeadZone.Flags.Health and hum then
-			local hp    = math.floor(hum.Health)
-			local maxhp = hum.MaxHealth
-			local frac  = (maxhp > 0) and math.clamp(hum.Health / maxhp, 0, 1) or 0
-			texts.health.Text     = "HP: " .. tostring(hp)
-			texts.health.Color    = Color3.fromRGB(255 - math.floor(195 * frac), 60 + math.floor(195 * frac), 60)
-			texts.health.Position = Vector2.new(cx, belowY + 2)
-			texts.health.Visible  = true
-			belowY = belowY + 16
+	-- Tracer line from viewport center to the bottom-center of the box.
+	if data.line then
+		if onScreen and DeadZone.Flags.Lines then
+			local cam = workspace.CurrentCamera
+			local vp  = cam and cam.ViewportSize or Vector2.new(0, 0)
+			data.line.From    = Vector2.new(vp.X / 2, vp.Y / 2)
+			data.line.To      = Vector2.new(cx, (minY + maxY) / 2)
+			data.line.Color   = color
+			data.line.Visible = true
 		else
-			texts.health.Visible = false
+			data.line.Visible = false
 		end
 	end
 end
@@ -393,9 +549,44 @@ for _, d in ipairs(workspace:GetDescendants()) do
 end
 track(workspace.DescendantAdded:Connect(trackHumanoid))
 
+-- Car tracking: any Model directly under workspace.__cars becomes a car target.
+local function untrackCar(car)
+	DeadZone.Cars[car] = nil
+	removeEsp(car)
+end
+
+local function trackCar(car)
+	if not (car and car:IsA("Model")) then return end
+	if DeadZone.Cars[car] then return end
+	local t = { conns = {} }
+	DeadZone.Cars[car] = t
+	table.insert(t.conns, car.AncestryChanged:Connect(function(_, parent)
+		if not parent then untrackCar(car) end
+	end))
+end
+
+do
+	local carsFolder = workspace:FindFirstChild("__cars")
+	if carsFolder then
+		for _, c in ipairs(carsFolder:GetChildren()) do trackCar(c) end
+		track(carsFolder.ChildAdded:Connect(trackCar))
+		track(carsFolder.ChildRemoved:Connect(untrackCar))
+	else
+		track(workspace.ChildAdded:Connect(function(ch)
+			if ch.Name == "__cars" then
+				for _, c in ipairs(ch:GetChildren()) do trackCar(c) end
+				track(ch.ChildAdded:Connect(trackCar))
+				track(ch.ChildRemoved:Connect(untrackCar))
+			end
+		end))
+	end
+end
+
 ensureDot()
 
 track(RunService.RenderStepped:Connect(function()
+	rebuildCarSeatIndex()
+
 	for model, t in pairs(DeadZone.Tracked) do
 		if not model.Parent or isSelf(model) then
 			untrack(model)
@@ -405,12 +596,28 @@ track(RunService.RenderStepped:Connect(function()
 				ensureEsp(model, kind)
 				local data = DeadZone.Esp[model]
 				if data then
-					if data.box then updateBox(model, data.box) end
-					updateLabels(model, data, t)
+					data._hum = t and t.hum or data._hum
+					updateBox(model, data, kind)
+					updateLabels(model, data, kind)
 				end
 			else
 				removeEsp(model)
 			end
+		end
+	end
+
+	for car, _ in pairs(DeadZone.Cars) do
+		if not car.Parent then
+			untrackCar(car)
+		elseif DeadZone.Flags.CarEsp then
+			ensureEsp(car, "Car")
+			local data = DeadZone.Esp[car]
+			if data then
+				updateBox(car, data, "Car")
+				updateLabels(car, data, "Car")
+			end
+		else
+			removeEsp(car)
 		end
 	end
 
@@ -430,6 +637,201 @@ track(RunService.RenderStepped:Connect(function()
 	end
 end))
 
+-- =========================================================
+-- Keybinds persistence: DeadZone_KeyBinds.txt
+-- Format per line: <BindName>=<KeyCode.Name or UserInputType.Name>
+-- Example:
+--   AimBind=LeftControl
+--   SpeedBind=J
+-- =========================================================
+local KEYBINDS_FILE = "DeadZone_KeyBinds.txt"
+
+local function fsRead(path)
+	local ok, res = pcall(function()
+		return (isfile and isfile(path)) and readfile(path) or nil
+	end)
+	return ok and res or nil
+end
+local function fsWrite(path, content)
+	pcall(function() if writefile then writefile(path, content) end end)
+end
+
+local function parseKeybindsFile(txt)
+	local out = {}
+	if not txt then return out end
+	for line in string.gmatch(txt, "[^\r\n]+") do
+		local k, v = line:match("^%s*([%w_]+)%s*=%s*([%w_]+)%s*$")
+		if k and v then out[k] = v end
+	end
+	return out
+end
+local function serializeKeybinds(tbl)
+	local lines = {}
+	for k, v in pairs(tbl) do table.insert(lines, tostring(k) .. "=" .. tostring(v)) end
+	table.sort(lines)
+	return table.concat(lines, "\n") .. "\n"
+end
+
+DeadZone.KeyBinds = parseKeybindsFile(fsRead(KEYBINDS_FILE))
+
+local function setKeybind(name, keyName)
+	DeadZone.KeyBinds[name] = keyName
+	fsWrite(KEYBINDS_FILE, serializeKeybinds(DeadZone.KeyBinds))
+end
+
+if DeadZone.KeyBinds.AimBind then
+	DeadZone.Flags.AimBindKey = DeadZone.KeyBinds.AimBind
+else
+	setKeybind("AimBind", DeadZone.Flags.AimBindKey)
+end
+
+-- =========================================================
+-- Aim runtime
+-- =========================================================
+local function resolveBindEnum(name)
+	if not name then return nil end
+	for _, item in ipairs(Enum.KeyCode:GetEnumItems()) do
+		if item.Name == name then return item end
+	end
+	for _, item in ipairs(Enum.UserInputType:GetEnumItems()) do
+		if item.Name == name then return item end
+	end
+	return nil
+end
+
+local aimEngaged = false   -- true while bind is held (hold-mode)
+local aimToggled = false   -- toggled state (toggle-mode)
+
+local function aimBindMatches(input)
+	local wanted = DeadZone.Flags.AimBindKey
+	if not wanted then return false end
+	if input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode.Name == wanted then return true end
+	if input.UserInputType.Name == wanted then return true end
+	return false
+end
+
+track(UserInput.InputBegan:Connect(function(input, gameProcessed)
+	if not DeadZone.Flags.Aim then return end
+	if gameProcessed then return end
+	if not aimBindMatches(input) then return end
+	if DeadZone.Flags.ToggleAim then
+		aimToggled = not aimToggled
+	else
+		aimEngaged = true
+	end
+end))
+
+track(UserInput.InputEnded:Connect(function(input)
+	if not aimBindMatches(input) then return end
+	if not DeadZone.Flags.ToggleAim then
+		aimEngaged = false
+	end
+end))
+
+local function isAimActive()
+	if not DeadZone.Flags.Aim then return false end
+	if DeadZone.Flags.ToggleAim then return aimToggled end
+	return aimEngaged
+end
+
+local function getAimPart(model)
+	if DeadZone.Flags.AimPart == "Torso" then
+		return model:FindFirstChild("UpperTorso")
+			or model:FindFirstChild("Torso")
+			or model:FindFirstChild("HumanoidRootPart")
+	end
+	return model:FindFirstChild("Head") or model:FindFirstChild("HumanoidRootPart")
+end
+
+-- Wallcheck: raycast from camera to target, excluding self+camera.
+local function hasLineOfSight(origin, targetPos)
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude = { workspace.CurrentCamera }
+	local char = LocalPlayer and LocalPlayer.Character
+	if char then table.insert(exclude, char) end
+	rp.FilterDescendantsInstances = exclude
+	rp.IgnoreWater = true
+	local dir = targetPos - origin
+	local res = workspace:Raycast(origin, dir, rp)
+	if not res then return true end
+	return (res.Position - targetPos).Magnitude < 3
+end
+
+local function findAimTarget()
+	local cam = workspace.CurrentCamera
+	if not cam then return nil end
+	local vp = cam.ViewportSize
+	local cx, cy = vp.X / 2, vp.Y / 2
+	local fov = DeadZone.Flags.AimFov or 100
+	local best, bestDist = nil, fov
+	for model, t in pairs(DeadZone.Tracked) do
+		if model.Parent and not isSelf(model)
+			and not (DeadZone.Flags.PlayerCheck and isZombie(model))
+		then
+			local hum = t.hum
+			if hum and hum.Health > 0 then
+				local part = getAimPart(model)
+				if part then
+					local sp = cam:WorldToViewportPoint(part.Position)
+					if sp.Z > 0 then
+						local dx, dy = sp.X - cx, sp.Y - cy
+						local d = math.sqrt(dx * dx + dy * dy)
+						if d <= bestDist then
+							if (not DeadZone.Flags.Wallcheck)
+								or hasLineOfSight(cam.CFrame.Position, part.Position) then
+								best = part
+								bestDist = d
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local fovCircle = Drawing.new("Circle")
+fovCircle.NumSides    = 60
+fovCircle.Filled      = false
+fovCircle.Thickness   = 1
+fovCircle.Transparency = 1
+fovCircle.Color       = Color3.new(1, 1, 1)
+fovCircle.Visible     = false
+DeadZone.FovCircle = fovCircle
+
+-- Fake connection so DeadZone.Unload disposes the Drawing on rerun.
+table.insert(DeadZone.Connections, {
+	Disconnect = function() pcall(function() fovCircle:Remove() end) end,
+})
+
+track(RunService.RenderStepped:Connect(function()
+	if DeadZone.Flags.Aim then
+		local cam = workspace.CurrentCamera
+		local vp  = cam and cam.ViewportSize or Vector2.new(0, 0)
+		fovCircle.Position = Vector2.new(vp.X / 2, vp.Y / 2)
+		fovCircle.Radius   = DeadZone.Flags.AimFov or 100
+		fovCircle.Color    = isAimActive()
+			and Color3.fromRGB(255, 60, 60)
+			or  Color3.new(1, 1, 1)
+		fovCircle.Visible  = true
+	else
+		fovCircle.Visible = false
+		aimToggled = false
+	end
+
+	if not isAimActive() then return end
+	local target = findAimTarget()
+	if not target then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	-- Smooth camera interpolation toward target (fixed factor 0.70) so the
+	-- visible motion looks humanlike instead of a hard snap.
+	local desired = CFrame.lookAt(cam.CFrame.Position, target.Position)
+	cam.CFrame = cam.CFrame:Lerp(desired, 0.70)
+end))
+
 local Window = ReGui:TabsWindow({
 	Title = "Dead Zone",
 	Size = UDim2.fromOffset(360, 420),
@@ -437,8 +839,60 @@ local Window = ReGui:TabsWindow({
 })
 DeadZone.Gui = Window
 
---// Combat tab (Silent Speed)
-local CombatTab = Window:CreateTab({ Name = "Combat" })
+--// Combat tab (Aim) — created first so it appears first in the TabsWindow.
+local CombatAimTab = Window:CreateTab({ Name = "Combat" })
+
+CombatAimTab:Checkbox({
+	Label = "Enable Aim",
+	Value = DeadZone.Flags.Aim,
+	Callback = function(_, v) DeadZone.Flags.Aim = v end,
+})
+CombatAimTab:Checkbox({
+	Label = "Enable Toggle Aim",
+	Value = DeadZone.Flags.ToggleAim,
+	Callback = function(_, v)
+		DeadZone.Flags.ToggleAim = v
+		-- Switching modes resets latched state so behaviour is predictable.
+		aimEngaged = false
+		aimToggled = false
+	end,
+})
+CombatAimTab:Checkbox({
+	Label = "Enable Wallcheck",
+	Value = DeadZone.Flags.Wallcheck,
+	Callback = function(_, v) DeadZone.Flags.Wallcheck = v end,
+})
+CombatAimTab:Checkbox({
+	Label = "Enable Player Check",
+	Value = DeadZone.Flags.PlayerCheck,
+	Callback = function(_, v) DeadZone.Flags.PlayerCheck = v end,
+})
+CombatAimTab:Keybind({
+	Label = "Aim Bind",
+	Value = resolveBindEnum(DeadZone.Flags.AimBindKey) or Enum.KeyCode.LeftControl,
+	IgnoreGameProcessed = false,
+	OnKeybindSet = function(_, keyId)
+		local name = (keyId and keyId.Name) or "LeftControl"
+		DeadZone.Flags.AimBindKey = name
+		setKeybind("AimBind", name)
+	end,
+})
+CombatAimTab:Combo({
+	Label = "Aim Part",
+	Selected = (DeadZone.Flags.AimPart == "Torso") and 2 or 1,
+	Items = { "Head", "Torso" },
+	Callback = function(_, name) DeadZone.Flags.AimPart = name end,
+})
+CombatAimTab:SliderInt({
+	Label = "Fov",
+	Value = DeadZone.Flags.AimFov,
+	Minimum = 30,
+	Maximum = 600,
+	Callback = function(_, v) DeadZone.Flags.AimFov = v end,
+})
+
+--// Movement tab (Silent Speed / WalkSpeed) — was 'Combat'
+local CombatTab = Window:CreateTab({ Name = "Movement" })
 
 CombatTab:Checkbox({
 	Label = "Enable Silent Speed",
@@ -502,6 +956,11 @@ VisualsTab:Checkbox({
 	Callback = function(_, v) DeadZone.Flags.PlayerEsp = v end,
 })
 VisualsTab:Checkbox({
+	Label = "Enable Car Esp",
+	Value = DeadZone.Flags.CarEsp,
+	Callback = function(_, v) DeadZone.Flags.CarEsp = v end,
+})
+VisualsTab:Checkbox({
 	Label = "Enable Zombie Esp",
 	Value = DeadZone.Flags.ZombieEsp,
 	Callback = function(_, v) DeadZone.Flags.ZombieEsp = v end,
@@ -530,6 +989,11 @@ VisualsTab:Checkbox({
 	Label = "Enable Health",
 	Value = DeadZone.Flags.Health,
 	Callback = function(_, v) DeadZone.Flags.Health = v end,
+})
+VisualsTab:Checkbox({
+	Label = "Enable Lines",
+	Value = DeadZone.Flags.Lines,
+	Callback = function(_, v) DeadZone.Flags.Lines = v end,
 })
 VisualsTab:Checkbox({
 	Label = "Enable Dot",
