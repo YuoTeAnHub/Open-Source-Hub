@@ -23,6 +23,10 @@ local DeadZone = {
 		Health        = false,
 		Dot           = false,
 		DisableCursor = false,
+		SilentSpeed   = false,
+		SilentSpeedMul = 1,
+		Speed         = false,
+		SpeedValue    = 16,
 	},
 }
 env.DeadZone = DeadZone
@@ -429,8 +433,66 @@ end))
 local Window = ReGui:TabsWindow({
 	Title = "Dead Zone",
 	Size = UDim2.fromOffset(360, 420),
+    NoSelect = true,
 })
 DeadZone.Gui = Window
+
+--// Combat tab (Silent Speed)
+local CombatTab = Window:CreateTab({ Name = "Combat" })
+
+CombatTab:Checkbox({
+	Label = "Enable Silent Speed",
+	Value = DeadZone.Flags.SilentSpeed,
+	Callback = function(_, v) DeadZone.Flags.SilentSpeed = v end,
+})
+CombatTab:SliderInt({
+	Label = "Silent Speed",
+	Value = DeadZone.Flags.SilentSpeedMul,
+	Minimum = 1,
+	Maximum = 50,
+	Callback = function(_, v) DeadZone.Flags.SilentSpeedMul = v end,
+})
+
+CombatTab:Checkbox({
+	Label = "Enable Speed",
+	Value = DeadZone.Flags.Speed,
+	Callback = function(_, v)
+		DeadZone.Flags.Speed = v
+		if not v then
+			local char = LocalPlayer.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum then hum.WalkSpeed = 16 end
+		end
+	end,
+})
+CombatTab:SliderInt({
+	Label = "Speed",
+	Value = DeadZone.Flags.SpeedValue,
+	Minimum = 1,
+	Maximum = 1000,
+	Callback = function(_, v) DeadZone.Flags.SpeedValue = v end,
+})
+
+track(RunService.Heartbeat:Connect(function()
+	if not DeadZone.Flags.Speed then return end
+	local char = LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum and hum.WalkSpeed ~= DeadZone.Flags.SpeedValue then
+		hum.WalkSpeed = DeadZone.Flags.SpeedValue
+	end
+end))
+
+track(RunService.Heartbeat:Connect(function()
+	if not DeadZone.Flags.SilentSpeed then return end
+	local char = LocalPlayer.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hrp or not hum then return end
+	if hum.MoveDirection.Magnitude > 0 then
+		hrp.CFrame = hrp.CFrame + (hum.MoveDirection * (DeadZone.Flags.SilentSpeedMul / 10))
+	end
+end))
 
 local VisualsTab = Window:CreateTab({ Name = "Visuals" })
 
