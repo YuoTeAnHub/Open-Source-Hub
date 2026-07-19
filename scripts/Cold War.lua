@@ -897,3 +897,9 @@ ColdWar.Destroy = function()
 end
 
 log("Loaded")
+
+game:GetService("StarterGui"):SetCore("SendNotification", {
+    Title = "Open Source Hub",
+    Text = "Cold War Loaded",
+    Duration = 5
+})
